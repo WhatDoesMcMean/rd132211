@@ -1,16 +1,27 @@
 package me.kalmemarq.render;
 
+import java.io.Closeable;
+import java.nio.ByteBuffer;
+import java.nio.IntBuffer;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+
 import org.lwjgl.glfw.Callbacks;
 import org.lwjgl.glfw.GLFW;
+import org.lwjgl.glfw.GLFWDropCallback;
 import org.lwjgl.glfw.GLFWErrorCallback;
+import org.lwjgl.glfw.GLFWImage;
 import org.lwjgl.glfw.GLFWVidMode;
 import org.lwjgl.opengl.GL;
+import org.lwjgl.stb.STBImage;
 import org.lwjgl.system.Configuration;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 
-import java.io.Closeable;
-import java.util.Objects;
+import me.kalmemarq.util.IOUtils;
 
 public class Window implements Closeable {
     private final long handle;
@@ -28,11 +39,19 @@ public class Window implements Closeable {
     private boolean currentFullscreen;
     private boolean vsync = true;
 
-    public Window(int width, int height) {
-        Configuration.DEBUG.set(false);
-        Configuration.DEBUG_LOADER.set(true);
-        Configuration.DEBUG_MEMORY_ALLOCATOR.set(true);
-        Configuration.DEBUG_STACK.set(true);
+    private ImGuiLayer imGuiLayer;
+    private List<EventHandler> eventHandlers;
+
+    public Window(int width, int height, String title) {
+        if (System.getProperty("whatDoesMcMean.lwjgl.debug") != null) {
+            Configuration.DEBUG.set(false);
+            Configuration.DEBUG_LOADER.set(true);
+            Configuration.DEBUG_MEMORY_ALLOCATOR.set(true);
+            Configuration.DEBUG_STACK.set(true);
+        }
+
+        this.eventHandlers = new ArrayList<>();
+        
         GLFWErrorCallback.createPrint(System.err).set();
         GLFW.glfwInit();
 
@@ -44,7 +63,7 @@ public class Window implements Closeable {
 
         this.width = width;
         this.height = height;
-        this.handle = GLFW.glfwCreateWindow(this.width, this.height, "", 0L, 0L);
+        this.handle = GLFW.glfwCreateWindow(this.width, this.height, title, 0L, 0L);
         GLFW.glfwMakeContextCurrent(this.handle);
         GLFW.glfwSwapInterval(1);
         GL.createCapabilities();
@@ -67,8 +86,58 @@ public class Window implements Closeable {
             this.framebufferWidth = w;
             this.framebufferHeight = h;
         });
+        
+        GLFW.glfwSetKeyCallback(this.handle, (_w, k, sc, a, m) -> {
+            for (EventHandler handler : this.eventHandlers) {
+                handler.onKey(k, a);
+            }
+        });
+
+        GLFW.glfwSetCharCallback(this.handle, (_w, c) -> {
+            for (EventHandler handler : this.eventHandlers) {
+                handler.onCharTyped(c);
+            }
+        });
+
+        GLFW.glfwSetMouseButtonCallback(this.handle, (_w, b, a, m) -> {
+            for (EventHandler handler : this.eventHandlers) {
+                handler.onMouseButton(b, a);
+            }
+        });
+        
+        GLFW.glfwSetCursorPosCallback(this.handle, (_w, x, y) -> {
+            for (EventHandler handler : this.eventHandlers) {
+                handler.onCursorPos(x, y);
+            }
+        });
+
+        GLFW.glfwSetScrollCallback(this.handle, (_w, xO, yO) -> {
+            for (EventHandler handler : this.eventHandlers) {
+                handler.onScroll(xO, yO);
+            }
+        });
+
+        GLFW.glfwSetDropCallback(this.handle, (_w, count, names) -> {
+            List<Path> paths = new ArrayList<>();
+
+            for (int i = 0; i < count; ++i) {
+                paths.add(Path.of(GLFWDropCallback.getName(names, i)));
+            }
+
+            paths = Collections.unmodifiableList(paths);
+
+            for (EventHandler handler : this.eventHandlers) {
+                handler.onDrop(paths);
+            }
+        });
 
         GLFW.glfwShowWindow(this.handle);
+
+        this.imGuiLayer = new ImGuiLayer(this);
+    }
+
+    public void addEventHandler(EventHandler eventHandler) {
+        this.eventHandlers.add(eventHandler);
     }
 
     public void toggleFullscreen() {
@@ -92,6 +161,10 @@ public class Window implements Closeable {
         return this.framebufferHeight;
     }
 
+    public ImGuiLayer getImGuiLayer() {
+        return this.imGuiLayer;
+    }
+
     public void setTitle(String title) {
         GLFW.glfwSetWindowTitle(this.handle, title);
     }
@@ -102,6 +175,37 @@ public class Window implements Closeable {
 
     public void grabMouse() {
         GLFW.glfwSetInputMode(this.handle, GLFW.GLFW_CURSOR, GLFW.GLFW_CURSOR_DISABLED);
+    }
+
+    public void setIcon() {
+        String[] icons = {"x16.png", "x32.png", "x48.png", "x64.png", "x128.png", "x256.png"};
+
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer wP = stack.mallocInt(1);
+            IntBuffer hP = stack.mallocInt(1);
+            IntBuffer cP = stack.mallocInt(1);
+
+            List<ByteBuffer> imageBuffers = new ArrayList<>();
+            GLFWImage.Buffer iconsBuffer = GLFWImage.malloc(icons.length, stack);
+            for (int i = 0; i < icons.length; ++i) {
+                ByteBuffer iconData = IOUtils.readFileToByteBuffer(IOUtils.getResourcesPath().resolve("icons/" + icons[i]));
+                ByteBuffer iconPixels = STBImage.stbi_load_from_memory(iconData, wP, hP, cP, 4);
+
+                if (iconPixels != null) {
+                    iconsBuffer.position(i);
+                    iconsBuffer.width(wP.get(0));
+                    iconsBuffer.height(hP.get(0));
+                    iconsBuffer.pixels(iconPixels);
+
+                    imageBuffers.add(iconPixels);
+                }
+
+                MemoryUtil.memFree(iconData);
+            }
+            iconsBuffer.position(0);
+            GLFW.glfwSetWindowIcon(this.handle, iconsBuffer);
+            imageBuffers.forEach(STBImage::stbi_image_free);
+        }
     }
 
     public void update() {
@@ -146,5 +250,25 @@ public class Window implements Closeable {
         GLFW.glfwDestroyWindow(this.handle);
         GLFW.glfwTerminate();
         Objects.requireNonNull(GLFW.glfwSetErrorCallback(null)).free();
+    }
+
+    public interface EventHandler {
+        default void onKey(int key, int action) {
+        }
+
+        default void onCharTyped(int codepoint) {
+        }
+
+        default void onMouseButton(int button, int action) {
+        }
+        
+        default void onCursorPos(double x, double y) {
+        }
+
+        default void onScroll(double xOffset, double yOffset) {
+        }
+
+        default void onDrop(List<Path> paths) {
+        }
     }
 }
